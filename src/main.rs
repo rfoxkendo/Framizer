@@ -7,7 +7,7 @@ use rust_ringitem_format::RingItem;   // We'll invent our own type.
 // these types.
 
 const TRACE_FRAME_ITEM_TYPE : u32 = 50;
-const TDC_FRAME_ITEM_TYPE   : u32 = 51;
+//const TDC_FRAME_ITEM_TYPE   : u32 = 51;   // comment so we don't warn.
 
 // In the end, we want to make a file that is 
 // made up of ring items that are frames.
@@ -206,11 +206,15 @@ fn write_ring_item(f : &mut File, frame: &Frame) -> std::io::Result<usize> {
         frame.frame_start,
         0,0
     );
-    ring_item.add(frame.data_size)
-        .add(frame.data_offset);
+    ring_item.add(frame.data_size)  // Lead with the data size and 
+        .add(frame.data_offset);    // frame offset.
+    
+    // In the loop below, word appears to be &u16 not u16 so it must
+    // be dereferenced.  Determined this experimnentally.
+
     for word  in &frame.data {     // If the vector is empty this will add nothing.
-        
-        ring_item.add(*word);
+
+        ring_item.add(*word);  
     }
     ring_item.write_item(f)
 }
