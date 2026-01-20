@@ -1,6 +1,14 @@
 use std::fs::File;
 use std::io::{BufReader, Read, ErrorKind};
 
+use rust_ringitem_format::RingItem;   // We'll invent our own type.
+
+// Ring item types for frames.... complete just so we sort of reserve
+// these types.
+
+const TRACE_FRAME_ITEM_TYPE : u32 = 50;
+const TDC_FRAME_ITEM_TYPE   : u32 = 51;
+
 // In the end, we want to make a file that is 
 // made up of ring items that are frames.
 // a frame is a fixed size time chunk consists of the following:
@@ -18,17 +26,17 @@ use std::io::{BufReader, Read, ErrorKind};
 
 // internally:
 
+#[derive(Debug)]
 struct Frame {
-    frame_type : u32,        // Always 2 (would be 1 for tdc data).
     frame_start: u64,        // Coarse timestamp - frame start.
     data_size: u32,          // data size samples in the frame.
     data_offset: u16,        // where in the frame the samples start.
     data: Vec<u16>,          // data_size samples.
 }
+
 impl Frame {
     pub fn new(start : u64) -> Frame {
         Frame {
-            frame_type : 2,
             frame_start : start,
             data_size   : 0,        // Must be computed
             data_offset : 0,        // Must be computed.
@@ -38,7 +46,7 @@ impl Frame {
 }
 
 // Data format in the file from Aaron:
-
+#[derive(Debug)]
 struct Trace {
     timestamp: u64,          // Coarse timestamp of the trace.
     data: Vec<u16>,         // data samples for the trace.
@@ -47,15 +55,16 @@ struct Trace {
 const FRAME_LENGTH: u64  = 512;   // Ticks in a window.
 fn main() {
     let file = File::open("traces.dat").unwrap();
+    let mut ring_file = File::create("frames.evt").unwrap();
+
     let mut reader = BufReader::new(file);
 
     // Read the traces from file.
 
 
     let mut frame_timestamp = 0;
-    let dummy_frame = Frame::new(frame_timestamp);
-    println!("Frames will be of type {} ", dummy_frame.frame_type);
     while let Some(trace) = read_next_trace(&mut reader) {
+
         // emit 0 length frames unitil the trace starts inside of it:
         // If the timetamp is already <frame_timestamp drop the trace:
 
@@ -63,11 +72,14 @@ fn main() {
             println!("Dropping trace with timestamp 0x{:x} because it starts before the current frame timestamp 0x{:x}.", trace.timestamp, frame_timestamp);
             continue;
         }
-        println!("trace at timestamp 0x{:x}", trace.timestamp);        
+
         while trace.timestamp >= frame_timestamp + FRAME_LENGTH {
 
             // emit an empty frame.
-            println!("Emitting empty frame with timestamp 0x{:x}.", frame_timestamp);
+            let empty_frame = Frame::new(frame_timestamp);
+
+            write_ring_item(&mut ring_file, &empty_frame).expect("Failed to write empty frame");
+
             frame_timestamp += FRAME_LENGTH;
         }
         // The trace starts in this frame:
@@ -82,7 +94,9 @@ fn main() {
             f.data_offset = data_offset as u16;
             f.data        = trace.data.clone();                     // whole trace.
 
-            println!("Whole trace fits in frame frame ts 0x{:x}, offset {}, length {} ", f.frame_start, f.data_offset, f.data_size);
+            // Whole trace fits in the frame
+
+            write_ring_item(&mut ring_file, &f).expect("Failed to write single frame trace");
             frame_timestamp += FRAME_LENGTH;
         
         } else {
@@ -92,7 +106,11 @@ fn main() {
             first_frame.data_offset = data_offset as u16;
             first_frame.data_size   = (FRAME_LENGTH - data_offset) as u32;   // this is what fits.
             first_frame.data.extend(&trace.data[0..first_frame.data_size as usize]);   // Extend the v ector with this slice.
-            println!("First frame ts 0x{:x} offset {}, length {}", first_frame.frame_start, first_frame.data_offset, first_frame.data_size);
+            
+            // emit first frame:
+
+            write_ring_item(&mut ring_file, &first_frame).expect("Failed to write first frame of multi-frame trace");
+
             cursor += first_frame.data_size as usize;                           // next slice.
             frame_timestamp += FRAME_LENGTH;
 
@@ -107,17 +125,15 @@ fn main() {
                     
                 } else {
                     frame.data_size = (trace.data.len() - cursor) as u32;
-                    frame.data.extend(&trace.data[cursor..]);   // Rest of the trace.
-
-                    
-                    
+                    frame.data.extend(&trace.data[cursor..]);   // Rest of the trace.       
                 }
+                // Output an overflow frame:
+
+                write_ring_item(&mut ring_file, &frame).expect("Failed to write overflow frame for multi-frame trace");
+
                 cursor += frame.data_size as usize;
                 frame_timestamp += FRAME_LENGTH;
 
-                //output what we did:
-
-                println!("Overflow frame with ts 0x{:x}  offset {}, length {} ", frame.frame_start, frame.data_offset, frame.data_size);
             }
         }
     }
@@ -165,9 +181,36 @@ fn read_next_trace(reader: &mut BufReader<File>) -> Option<Trace> {
             }
         }
         let sample = u16::from_le_bytes(sample_buf);
+       
         samples.push(sample);
     } 
     Some(Trace { timestamp: timestamp, 
         data: samples 
     })
+}
+//
+// Write a frame as a ring item.
+// The ring item will have:
+// - A type of TRACE_FRAME_ITEM_TYPE
+// - A body header with timestamp the frame start time.
+//   source id and barrier type 0, since this is a test.
+// - A ring item body that consists of:
+//   frame.data_size
+//   frame.data_offset
+//   frame.data
+fn write_ring_item(f : &mut File, frame: &Frame) -> std::io::Result<usize> {
+
+    // Create and fill the ring item:
+    let mut ring_item = RingItem::new_with_body_header(
+        TRACE_FRAME_ITEM_TYPE, 
+        frame.frame_start,
+        0,0
+    );
+    ring_item.add(frame.data_size)
+        .add(frame.data_offset);
+    for word  in &frame.data {     // If the vector is empty this will add nothing.
+        
+        ring_item.add(*word);
+    }
+    ring_item.write_item(f)
 }
